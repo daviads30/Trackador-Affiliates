@@ -4,7 +4,9 @@
  * Fluxo:
  * 1) /start (ou /setlink) -> bot pede link de afiliado (wlsuperbet.../C.ashx?...).
  * 2) Bot extrai e salva: siteid, affid, adid, c (todos do link enviado).
- * 3) Bot pede link do bilhete (superbet.bet.br/bilhete-compartilhado/XXXX).
+ * 3) Bot pede o BILHETE:
+ *    - aceita o link completo: https://superbet.bet.br/bilhete-compartilhado/891S-YJLHXM
+ *    - OU aceita só o código: 891S-YJLHXM
  * 4) Bot responde com:
  *    https://wlsuperbet.adsrv.eacdn.com/C.ashx?btag=a_{siteid}b_{adid}c_&affid={affid}&siteid={siteid}&adid={adid}&c={c}&asclurl={bilhete}
  *
@@ -19,6 +21,8 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 
 // ===== CONFIG =====
 const DB_FILE = "./db.json";
+const BET_HOST = "superbet.bet.br";
+const BET_PATH_PREFIX = "/bilhete-compartilhado/";
 
 // ===== DB HELPERS =====
 function loadDB() {
@@ -37,7 +41,7 @@ function saveDB(db) {
 function getUser(db, userId) {
   if (!db.users[userId]) {
     db.users[userId] = {
-      step: "idle", // idle | waiting_affiliate_link | waiting_bet_link
+      step: "idle", // idle | waiting_affiliate_link | waiting_bet
       affiliate: null, // { siteid, affid, adid, c }
     };
   }
@@ -67,9 +71,7 @@ function parseAffiliateLink(text) {
   const c = url.searchParams.get("c"); // vem do link
 
   if (!siteid || !affid || !adid || !c) {
-    throw new Error(
-      "Link incompleto. Precisa conter: siteid, affid, adid e c."
-    );
+    throw new Error("Link incompleto. Precisa conter: siteid, affid, adid e c.");
   }
 
   if (!/^\d+$/.test(siteid)) throw new Error("siteid inválido (deveria ser numérico).");
@@ -79,26 +81,49 @@ function parseAffiliateLink(text) {
   return { siteid, affid, adid, c };
 }
 
-function parseBetSlipLink(text) {
-  let url;
-  try {
-    url = new URL(text.trim());
-  } catch {
-    throw new Error("Link do bilhete inválido (não parece URL).");
+/**
+ * Aceita:
+ *  - LINK: https://superbet.bet.br/bilhete-compartilhado/891S-YJLHXM
+ *  - CÓDIGO: 891S-YJLHXM
+ */
+function parseBetInput(input) {
+  const raw = input.trim();
+
+  // Caso 1: usuário mandou só o código (sem http)
+  // Permite letras/números e hífen, com tamanho razoável
+  const codeOnlyMatch = raw.match(/^[A-Za-z0-9-]{4,40}$/);
+  if (codeOnlyMatch) {
+    const code = raw;
+    return {
+      code,
+      fullUrl: `https://${BET_HOST}${BET_PATH_PREFIX}${code}`,
+    };
   }
 
-  const hostOk = url.hostname.includes("superbet.bet.br");
+  // Caso 2: usuário mandou URL completa
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(
+      "Bilhete inválido. Envie o link completo OU somente o código (ex: 891S-YJLHXM)."
+    );
+  }
+
+  const hostOk = url.hostname.includes(BET_HOST);
   const pathMatch = url.pathname.match(/^\/bilhete-compartilhado\/([A-Za-z0-9-]+)$/);
 
   if (!hostOk || !pathMatch) {
     throw new Error(
-      "Esse não parece ser um link de bilhete compartilhado da Superbet (/bilhete-compartilhado/...)."
+      "Bilhete inválido. Envie o link completo (/bilhete-compartilhado/...) OU somente o código (ex: 891S-YJLHXM)."
     );
   }
 
   const code = pathMatch[1];
-  const fullUrl = `https://superbet.bet.br/bilhete-compartilhado/${code}`;
-  return { code, fullUrl };
+  return {
+    code,
+    fullUrl: `https://${BET_HOST}${BET_PATH_PREFIX}${code}`,
+  };
 }
 
 // ===== BUILDER =====
@@ -144,9 +169,7 @@ bot.command("setlink", async (ctx) => {
   u.step = "waiting_affiliate_link";
   saveDB(db);
 
-  return ctx.reply(
-    "Beleza. Me envie seu LINK DE AFILIADO agora (wlsuperbet.../C.ashx?...)."
-  );
+  return ctx.reply("Beleza. Me envie seu LINK DE AFILIADO agora (wlsuperbet.../C.ashx?...).");
 });
 
 bot.command("bilhete", async (ctx) => {
@@ -157,18 +180,18 @@ bot.command("bilhete", async (ctx) => {
   if (!u.affiliate) {
     u.step = "waiting_affiliate_link";
     saveDB(db);
-    return ctx.reply(
-      "Antes preciso do seu link de afiliado.\n" +
-        "Me envie o link (wlsuperbet.../C.ashx?...)."
-    );
+    return ctx.reply("Antes preciso do seu link de afiliado. Me envie o link (wlsuperbet.../C.ashx?...).");
   }
 
-  u.step = "waiting_bet_link";
+  u.step = "waiting_bet";
   saveDB(db);
 
   return ctx.reply(
-    "Agora me envie o LINK DO BILHETE:\n" +
-      "https://superbet.bet.br/bilhete-compartilhado/891S-YJLHXM"
+    "Agora me envie o BILHETE:\n" +
+      "✅ Pode ser o link completo:\n" +
+      "https://superbet.bet.br/bilhete-compartilhado/891S-YJLHXM\n\n" +
+      "✅ Ou somente o código:\n" +
+      "891S-YJLHXM"
   );
 });
 
@@ -177,9 +200,7 @@ bot.command("me", async (ctx) => {
   const userId = String(ctx.from.id);
   const u = getUser(db, userId);
 
-  if (!u.affiliate) {
-    return ctx.reply("Você ainda não configurou seu link. Use /start ou /setlink.");
-  }
+  if (!u.affiliate) return ctx.reply("Você ainda não configurou seu link. Use /start ou /setlink.");
 
   const a = u.affiliate;
   return ctx.reply(
@@ -208,7 +229,7 @@ bot.command("help", async (ctx) => {
       "/bilhete - gerar link do bilhete\n" +
       "/me - ver cadastro\n" +
       "/reset - apagar cadastro\n\n" +
-      "Você também pode só colar o link de afiliado ou do bilhete aqui no chat."
+      "Você pode colar o link de afiliado ou mandar o código do bilhete direto (ex: 891S-YJLHXM)."
   );
 });
 
@@ -226,7 +247,7 @@ bot.on("text", async (ctx) => {
       const affiliate = parseAffiliateLink(text);
 
       u.affiliate = affiliate;
-      u.step = "waiting_bet_link";
+      u.step = "waiting_bet";
       saveDB(db);
 
       return ctx.reply(
@@ -235,22 +256,20 @@ bot.on("text", async (ctx) => {
           `affid: ${affiliate.affid}\n` +
           `adid: ${affiliate.adid}\n` +
           `c: ${affiliate.c}\n\n` +
-          "Agora me envie o LINK DO BILHETE:\n" +
-          "https://superbet.bet.br/bilhete-compartilhado/891S-YJLHXM"
+          "Agora me envie o BILHETE (link ou código):\n" +
+          "Ex: 891S-YJLHXM"
       );
     }
 
-    // 2) Esperando link do bilhete
-    if (u.step === "waiting_bet_link") {
+    // 2) Esperando bilhete (link OU código)
+    if (u.step === "waiting_bet") {
       if (!u.affiliate) {
         u.step = "waiting_affiliate_link";
         saveDB(db);
-        return ctx.reply(
-          "Me envie primeiro seu link de afiliado (wlsuperbet.../C.ashx?...)."
-        );
+        return ctx.reply("Me envie primeiro seu link de afiliado (wlsuperbet.../C.ashx?...).");
       }
 
-      const bet = parseBetSlipLink(text);
+      const bet = parseBetInput(text);
       const finalLink = buildFinalTrackingLink(u.affiliate, bet.fullUrl);
 
       u.step = "idle";
@@ -259,32 +278,41 @@ bot.on("text", async (ctx) => {
       return ctx.reply("🎟️ Aqui está seu link rastreado:\n" + finalLink);
     }
 
-    // Se não está em fluxo:
+    // ===== Fora do fluxo (auto-detect) =====
+
     // Se colar link de afiliado -> salva e pede bilhete
     if (text.includes("wlsuperbet.adsrv.eacdn.com/C.ashx")) {
       const affiliate = parseAffiliateLink(text);
 
       u.affiliate = affiliate;
-      u.step = "waiting_bet_link";
+      u.step = "waiting_bet";
       saveDB(db);
 
-      return ctx.reply(
-        "✅ Link de afiliado salvo! Agora mande o LINK DO BILHETE."
-      );
+      return ctx.reply("✅ Link de afiliado salvo! Agora mande o BILHETE (link ou código).");
     }
 
-    // Se colar link de bilhete -> gera se tiver afiliado
+    // Se mandou link completo do bilhete e já tem afiliado -> gera
     if (text.includes("superbet.bet.br/bilhete-compartilhado/")) {
       if (!u.affiliate) {
         u.step = "waiting_affiliate_link";
         saveDB(db);
-        return ctx.reply(
-          "Antes configure seu link de afiliado:\n" +
-            "Use /start ou cole seu link (wlsuperbet.../C.ashx?...)" 
-        );
+        return ctx.reply("Antes configure seu link de afiliado com /start ou cole seu link (wlsuperbet.../C.ashx?...).");
       }
 
-      const bet = parseBetSlipLink(text);
+      const bet = parseBetInput(text);
+      const finalLink = buildFinalTrackingLink(u.affiliate, bet.fullUrl);
+      return ctx.reply("🎟️ Link rastreado:\n" + finalLink);
+    }
+
+    // Se mandou só o código (ex: 891S-YJLHXM) e já tem afiliado -> gera
+    if (/^[A-Za-z0-9-]{4,40}$/.test(text)) {
+      if (!u.affiliate) {
+        u.step = "waiting_affiliate_link";
+        saveDB(db);
+        return ctx.reply("Antes configure seu link de afiliado com /start ou cole seu link (wlsuperbet.../C.ashx?...).");
+      }
+
+      const bet = parseBetInput(text);
       const finalLink = buildFinalTrackingLink(u.affiliate, bet.fullUrl);
       return ctx.reply("🎟️ Link rastreado:\n" + finalLink);
     }
